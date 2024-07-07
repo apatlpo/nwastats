@@ -1,0 +1,25 @@
+name: nwa
+channels:
+  - pyviz
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - tqdm
+  - jupyterlab
+  - xarray
+  - dask
+  - opt_einsum
+  - cython
+  - numba
+  - xrft
+  - numpy_groupies
+  - netcdf4
+  - zarr
+  - hvplot
+  - seaborn
+  - arviz
+  - corner
+  - cmocean
+  - ffmpeg
+  - parcels
