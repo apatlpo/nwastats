@@ -86,6 +86,16 @@ def run():
     )
     logging.info("dsf attributes: "+" ;".join([f"{k}/{v}" for k, v in dsf.attrs.items()]))
 
+    # gather common kwargs
+    lowers, uppers = None, None
+    kwargs = dict(
+        dx=dx, no_time=no_time, no_space=no_space, 
+    )
+    if enable_nu:
+        _covparams = dict(zip(labels[1:], covparams))
+        kwargs["lowers"] = [None]*3 + [_covparams["νs"]-0.5, _covparams["νt"]-0.49] + [None]
+        kwargs["uppers"] = [None]*3 + [_covparams["νs"]+0.5, _covparams["νt"]+0.5] + [None]
+
     # ---
     # ## mooring inference
     logging.info("starting mooring inference ...")
@@ -106,8 +116,8 @@ def run():
         # do not overwrite
         if not os.path.isfile(nc):
             ds = st.run_mooring_ensembles(
-                Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
-                no_time=no_time, no_space=no_space,
+                Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise,
+                **kwargs,
             ) 
             ds.to_netcdf(nc, mode="w")
         else:
@@ -149,8 +159,8 @@ def run():
 
         if not os.path.isfile(nc):
             ds = st.run_drifter_ensembles(
-                run_dir, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
-                no_time=no_time, no_space=no_space,
+                run_dir, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, 
+                **kwargs,
             ) 
             ds.to_netcdf(nc, mode="w")
         else:

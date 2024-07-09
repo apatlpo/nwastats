@@ -46,9 +46,9 @@ def matern_general(dx, eta, nu, l):
     """General Matern base function"""
     
     cff1 = np.sqrt(2*nu)*np.abs(dx)/l
-    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu)
-    K *= np.power(cff1, nu)
+    K = np.power(cff1, nu)
     K *= kv(nu, cff1)
+    K *= np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu)
 
     if isinstance(K, np.ndarray):
         K[np.isnan(K)] = np.power(eta, 2.)
@@ -60,11 +60,11 @@ def matern_general_d1(dx, eta, nu, l):
     
     cff0 = np.sqrt(2*nu)/l
     cff1 = cff0*np.abs(dx)
-    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0
-    K *= (
+    K = (
         nu*np.power(cff1, nu-1)*kv(nu, cff1)
         + np.power(cff1, nu)*kvp(nu, cff1, n=1)
     )
+    K *= np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0
     K[np.isnan(K)] = 0.
     # but remember K'(d)/d converge toward K''(0) towards 0
     
@@ -75,12 +75,12 @@ def matern_general_d2(dx, eta, nu, l):
     
     cff0 = np.sqrt(2*nu)/l
     cff1 = cff0*np.abs(dx)
-    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0**2
-    K *= (
+    K = (
         nu*(nu-1)*np.power(cff1, nu-2)*kv(nu,cff1) 
         + 2*nu*np.power(cff1, nu-1)*kvp(nu,cff1, n=1)
         + np.power(cff1, nu)*kvp(nu, cff1, n=2)
     )
+    K *= np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0**2
     K[np.isnan(K)] = -np.power(eta, 2.) * nu/(nu-1)/l**2
     
     return K
@@ -254,11 +254,12 @@ def get_cov_1D(cov_x, cov_t, enable_nu):
     #Cu, Cv, Cuv = (lambda x, y, d, λ: np.eye(*x.shape),)*3 
 
     if enable_nu:
-        Ct = matern_general
+        #Ct = lambda x, xT, nu, λ: cov.matern_general_1d(x, xT, (1., nu, λ))
+        Ct = lambda x, xT, nu, λ: matern_general(np.abs(x-xT), 1., nu, λ)
     else:
         Ct = getattr(cov, cov_t)
 
-    return C, Ct, isotropy, enable_nu
+    return C, Ct, isotropy
 
 def kernel_3d(x, xpr, params, C):
     """
@@ -328,8 +329,8 @@ def kernel_3d_iso_uv(x, xpr, params, C):
         pt = (lt,)
     elif len(params)==5:
         eta, ld, lt, nu_s, nu_t = params
-        ps = (ld, nu_s)
-        pt = (lt, nu_t)
+        ps = (nu_s, ld,)
+        pt = (nu_t, lt,)
     Cu, Cv, Cuv, Ct = C
     
     # Build the covariance matrix
@@ -337,9 +338,8 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     _x = x[:n,0,None] - xpr.T[:n,0,None].T
     _y = x[:n,1,None] - xpr.T[:n,1,None].T
     _d = np.sqrt( _x**2 + _y**2 )
-    #
+    
     C = np.ones((2*n,2*n))
-    #
     C[:n,:n] *= Cu(_x, _y, _d, *ps)
     C[n:,n:] *= Cv(_x, _y, _d, *ps)
     #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
@@ -351,7 +351,9 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     #_Cv  = Cv(_x, _y, _d, ld)
     #_Cuv  = Cuv(_x, _y, _d, ld)
     #C *= np.block([[_Cu, _Cuv],[_Cuv, _Cv]])
+
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, *pt)
+
     C *= eta**2
     
     return C
@@ -376,8 +378,8 @@ def kernel_3d_iso_uv_traj(x, xpr, params, C):
         pt = (lt,)
     elif len(params)==5:
         eta, ld, lt, nu_s, nu_t = params
-        ps = (ld, nu_s)
-        pt = (lt, nu_t)
+        ps = (nu_s, ld,)
+        pt = (nu_t, lt,)
     Cu, Cv, Cuv, Ct = C
     
     # Build the covariance matrix
@@ -385,17 +387,19 @@ def kernel_3d_iso_uv_traj(x, xpr, params, C):
     _x = x[:n,0,None] - xpr.T[:n,0,None].T
     _y = x[:n,1,None] - xpr.T[:n,1,None].T
     _d = np.sqrt( _x**2 + _y**2 )
-    #
+    
     C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, *ps)
     C[n:,n:] *= Cv(_x, _y, _d, *ps)
     #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change"
     C[:n,n:] *= Cuv(_x, _y, _d, *ps)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
-    #
+
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, *pt)
+
     # decorrelate different trajectories (moorings/drifters)
     C *= ( (x[:,3,None] - xpr.T[:,3,None].T)==0 ).astype(int)
+    
     C *= eta**2
     
     return C
@@ -895,8 +899,10 @@ def amplitude_decifit(dx, λ, ν):
 
 def prepare_inference(
     run_dir,
-    uv, no_time, no_space, 
-    parameter_eta_formulation, traj_decorrelation,
+    uv, 
+    no_time, no_space, 
+    parameter_eta_formulation, 
+    traj_decorrelation,
     enable_nu,
 ):
 
@@ -1079,7 +1085,8 @@ def inference_MH(
     n_mcmc = 20_000,
     steps = None,
     tqdm_disable=False,
-    no_time=False, no_space=False,
+    #no_time=False, no_space=False,
+    lowers=None, uppers=None,
     **kwargs,
 ):
 
@@ -1098,8 +1105,15 @@ def inference_MH(
     step_sizes = np.array(
         [v*s for v, s in zip(initialisations, steps)]
     )
-    lowers = np.repeat(0, N)
-    uppers = initialisations * 10
+    if lowers is None:
+        lowers = np.repeat(0, N)
+    else:
+        lowers = [l if l is not None else 0 for l in lowers]
+    _uppers = initialisations * 10
+    if uppers is None:
+        uppers = _uppers
+    else:
+        uppers = [u if u is not None else _u for u, _u in zip(uppers, _uppers)]
 
     # setup objects
     samples = [np.empty(n_mcmc) for _ in range(N)]
@@ -1141,6 +1155,7 @@ def inference_MH(
         alpha = np.min([1, np.exp(lp_proposed - lp_current)])
         u = np.random.uniform()
 
+        #if alpha > u or True:  # dev
         if alpha > u:
             for s, p in zip(samples, proposed):
                 s[i] = p
