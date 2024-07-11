@@ -87,11 +87,11 @@ def run():
     logging.info("dsf attributes: "+" ;".join([f"{k}/{v}" for k, v in dsf.attrs.items()]))
 
     # gather common kwargs
-    lowers, uppers = None, None
     kwargs = dict(
         dx=dx, no_time=no_time, no_space=no_space, 
     )
     if enable_nu:
+        # expected order hardcoded below ... danger
         _covparams = dict(zip(labels[1:], covparams))
         kwargs["lowers"] = [None]*3 + [_covparams["νs"]-0.5, _covparams["νt"]-0.49] + [None]
         kwargs["uppers"] = [None]*3 + [_covparams["νs"]+0.5, _covparams["νt"]+0.5] + [None]
