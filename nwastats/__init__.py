@@ -175,6 +175,29 @@ def get_cov_1D(cov_x, cov_t, enable_nu):
                 ) / d**2
             C[np.isnan(C)] = 0.
             return C
+        # for covariances based on distances
+        #def Cu(x, y, d, nu, λ):
+        #    assert False, "need revert back"
+        #    C = -(
+        #        y**2 * matern52_d2(d, 1., λ)
+        #        + x**2 * matern52_d1(d, 1., λ) / d
+        #    )/ d**2
+        #    C[np.isnan(C)] = -matern52_d2(d[np.isnan(C)], 1.0, λ)
+        #    return C
+        #def Cv(x, y, d, nu, λ):
+        #    C = -(
+        #        x**2 * matern52_d2(d, 1., λ)
+        #        + y**2 * matern52_d1(d, 1., λ) / d
+        #    ) / d**2
+        #    C[np.isnan(C)] = -matern52_d2(d[np.isnan(C)], 1.0, λ)
+        #    return C
+        #def Cuv(x, y, d, nu, λ):
+        #    C = x*y*(
+        #            matern52_d2(d, 1., λ)
+        #            - matern52_d1(d, 1., λ) / d
+        #        ) / d**2
+        #    C[np.isnan(C)] = 0.
+        #    return C        
         C = (Cu, Cv, Cuv)
     elif cov_x == "matern2_iso":
         nu = 2
@@ -331,6 +354,8 @@ def kernel_3d_iso_uv(x, xpr, params, C):
         eta, ld, lt, nu_s, nu_t = params
         ps = (nu_s, ld,)
         pt = (nu_t, lt,)
+        #ps = (5/2, ld,) # dev
+        #pt = (1/2, lt,) # dev
     Cu, Cv, Cuv, Ct = C
     
     # Build the covariance matrix
@@ -354,6 +379,47 @@ def kernel_3d_iso_uv(x, xpr, params, C):
 
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, *pt)
 
+    C *= eta**2
+    
+    return C
+
+# dev
+def kernel_3d_iso_uv_old(x, xpr, params, C):
+    """
+    3D spatially isotropic kernel, two velocity components
+    
+    Inputs:
+        x: matrices input points [N,3]
+        xpr: matrices output points [M,3]
+        params: tuple length 3
+            eta: standard deviation
+            ld: spatial scale
+            lt: t length scale
+            
+    """
+    eta, ld, lt = params
+    Cu, Cv, Cuv, Ct = C
+    
+    # Build the covariance matrix
+    n = x.shape[0]//2
+    _x = x[:n,0,None] - xpr.T[:n,0,None].T
+    _y = x[:n,1,None] - xpr.T[:n,1,None].T
+    _d = np.sqrt( _x**2 + _y**2 )
+    #
+    C = np.ones((2*n,2*n))
+    #
+    C[:n,:n] *= Cu(_x, _y, _d, ld)
+    C[n:,n:] *= Cv(_x, _y, _d, ld)
+    #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
+    # it is correct: Cuv = Cuv.T, Cuv is even in terms of x and y
+    C[:n,n:] *= Cuv(_x, _y, _d, ld)
+    C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
+    #
+    #_Cu  = Cu(_x, _y, _d, ld)
+    #_Cv  = Cv(_x, _y, _d, ld)
+    #_Cuv  = Cuv(_x, _y, _d, ld)
+    #C *= np.block([[_Cu, _Cuv],[_Cuv, _Cv]])
+    C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
     C *= eta**2
     
     return C
@@ -1082,7 +1148,8 @@ def inference_MH(
     X, U,
     noise, covparams,
     covfunc, labels,
-    n_mcmc = 20_000,
+    #n_mcmc = 20_000,
+    n_mcmc = None,
     steps = None,
     tqdm_disable=False,
     #no_time=False, no_space=False,
@@ -1090,6 +1157,8 @@ def inference_MH(
     **kwargs,
 ):
 
+    #assert n_mcmc==500, "n_mcmc is not 500" # dev
+    
     # number of parameters infered
     N = len(labels)
 
@@ -1114,6 +1183,119 @@ def inference_MH(
         uppers = _uppers
     else:
         uppers = [u if u is not None else _u for u, _u in zip(uppers, _uppers)]
+
+    # setup objects
+    samples = [np.empty(n_mcmc) for _ in range(N)]
+    accept_samples = np.empty(n_mcmc)
+    lp_samples = np.empty(n_mcmc)
+    lp_samples[:] = np.nan
+    # init samples
+    for i, s in enumerate(samples):
+        s[0] =  initialisations[i]
+    accept_samples[0] = 0
+    #
+    covparams_prop = initialisations.copy()[:N-1]
+    # run mcmc
+    gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
+
+    for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
+        
+        proposed = np.array([
+            np.random.normal(s[i-1], step, 1)
+            for s, step in zip(samples, step_sizes)
+        ])
+
+        if ((proposed.T <= lowers) | (proposed.T >= uppers)).any():
+            for s in samples:
+                s[i] = s[i-1]
+            lp_samples[i] = lp_samples[i-1]
+            accept_samples[i] = 0
+            continue
+
+        if accept_samples[i-1] == True:
+            gp_current = gp_proposed
+
+        covparams_prop = proposed[:-1]
+        gp_proposed = GPtideScipy(X, X, proposed[-1], covfunc, covparams_prop)
+
+        lp_current = gp_current.log_marg_likelihood(U)
+        lp_proposed = gp_proposed.log_marg_likelihood(U)
+
+        alpha = np.min([1, np.exp(lp_proposed - lp_current)])
+        u = np.random.uniform()
+
+        #if alpha > u or True:  # dev
+        if alpha > u:
+            for s, p in zip(samples, proposed):
+                s[i] = p
+            accept_samples[i] = 1
+            lp_samples[i] = lp_proposed
+        else:
+            for s, p in zip(samples, proposed):
+                s[i] = s[i-1]
+            accept_samples[i] = 0
+            lp_samples[i] = lp_samples[i-1]
+
+    samples = np.vstack([samples[-1]]+samples[:-1])
+    ds = xr.Dataset(
+        dict(
+            samples=(("i", "parameter"), samples.T), 
+            accept=("i", accept_samples),
+            log_prob=("i", lp_samples),
+            init=(("parameter",), np.roll(initialisations,1)), # need to swap parameter orders
+            lower=(("parameter",), np.roll(lowers,1)),
+            upper=(("parameter",), np.roll(uppers,1)),
+            steps=(("parameter",), np.roll(step_sizes, 1)),
+        ),
+        coords=dict(parameter=labels)
+    )
+
+    #return noise_samples, eta_samples, ld_samples, lt_samples, 
+    accepted_fraction = float(ds["accept"].mean())
+    print(f"accepted fraction = {accepted_fraction*100:.1f} %")
+
+    # keep only accepted samples
+    #ds = ds.where(ds.accept==1, drop=True)
+
+    # store useful metrics / info
+    i_map = int(ds["log_prob"].argmax())
+    ds["MAP"] = ds["samples"].isel(i=i_map)
+    ds["accepted_fraction"] = accepted_fraction
+    ds["i_MAP"] = i_map
+    ds["ess"] = compute_ess(ds)
+    ds.attrs["inference"] = "MH"
+
+    return ds
+
+# dev - old
+def inference_MH_old(
+    X, U,
+    noise, covparams,
+    covfunc, labels,
+    n_mcmc = 20_000,
+    steps = None,
+    tqdm_disable=False,
+    no_time=False, no_space=False,
+    **kwargs,
+):
+
+    # number of parameters infered
+    N = len(labels)
+
+    # default step sizes
+    if steps is None:
+        # ** isn't this too coarse ? **
+        steps = [1/5]*(N-1) + [1/2]
+    
+    # The order of everything is eta, ld, lt, noise
+    #step_sizes = np.array([.5, 5, .5, 0.005])
+    #initialisations = np.array([12, 100, 5, 0.01])
+    initialisations = np.array(covparams+[noise])
+    step_sizes = np.array(
+        [v*s for v, s in zip(initialisations, steps)]
+    )
+    lowers = np.repeat(0, N)
+    uppers = initialisations * 10
 
     # setup objects
     samples = [np.empty(n_mcmc) for _ in range(N)]
@@ -1155,7 +1337,6 @@ def inference_MH(
         alpha = np.min([1, np.exp(lp_proposed - lp_current)])
         u = np.random.uniform()
 
-        #if alpha > u or True:  # dev
         if alpha > u:
             for s, p in zip(samples, proposed):
                 s[i] = p
@@ -1350,17 +1531,17 @@ def run_mooring_ensembles(
     dkwargs.update(**kwargs)
 
     # MH default
-    dkwargs["steps"] = (step, step, step, 1/2)
+    #dkwargs["steps"] = (step, step, step, 1/2)
 
     # preload data:
     D = [
-        mooring_inference_preprocess(dsf, seed, N, **kwargs)
+        mooring_inference_preprocess(dsf, seed, N, **dkwargs)
         for seed in range(Ne)
     ]
     mooring_inference_delayed = dask.delayed(mooring_inference)
     datasets = [
         mooring_inference_delayed(
-            ds, seed, 
+            ds, seed,
             covparams, covfunc, labels, N, noise, 
             preprocessed=True,
             **dkwargs,
@@ -1370,7 +1551,7 @@ def run_mooring_ensembles(
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    ds = ds.isel(i=slice(0,None,5)) # subsample MCMC
+    #ds = ds.isel(i=slice(0,None,5)) # subsample MCMC - moved to post-processing step
     return ds
 
 def open_drifter_file(run_dir, flow_scale=None, filter=True, **kwargs):
@@ -1550,12 +1731,12 @@ def run_drifter_ensembles(
     dkwargs.update(**kwargs)
 
     # MH
-    dkwargs["steps"] = (step, step, step, 1/2)
+    #dkwargs["steps"] = (step, step, step, 1/2)
 
     # preload data
-    ds = open_drifter_file(run_dir, **kwargs)
+    ds = open_drifter_file(run_dir, **dkwargs)
     D = [
-        drifter_preprocess(run_dir, N, seed, ds=ds, **kwargs)
+        drifter_preprocess(run_dir, N, seed, ds=ds, **dkwargs)
         for seed in range(Ne)
     ]
     
@@ -1573,7 +1754,7 @@ def run_drifter_ensembles(
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    ds = ds.isel(i=slice(0,None,5)) # subsample MCMC
+    #ds = ds.isel(i=slice(0,None,5)) # subsample MCMC - moved to post-processing step
     return ds
 
 
@@ -1693,6 +1874,14 @@ def convert_to_az(d, labels, burn=0):
     for ii, ll in enumerate(labels):
         output.update({ll:d[burn:,ii]})
     return az.convert_to_dataset(output)
+
+def compute_ess(ds):
+    """ Calculate estimate of the effective sample size (ess) 
+    https://python.arviz.org/en/stable/api/generated/arviz.ess.html
+    """
+    des = az.ess(convert_to_az(ds.samples.data, ds.parameter.data))
+    return xr.DataArray(np.array([float(des[v]) for v in list(ds.parameter.data)]), dims="parameter")
+    
 
 def plot_inference(ds, stack=False, corner_plot=True, xlim=True, burn=None):
 
@@ -2001,7 +2190,6 @@ def print_quantile_width(ds, dim, quantiles=(1/4, 3/4)):
 def label_and_print(fig, axs, fig_name):
     """ add labels on figures and print into files """
 
-
     if axs is not None:
         for label, ax in axs.items():
             # label physical distance in and down:
@@ -2016,3 +2204,18 @@ def label_and_print(fig, axs, fig_name):
         _fig_name = os.path.join(fig_dir, fig_name+"."+fmt)
         fig.savefig(_fig_name)
         print(f"scp dunree:{_fig_name} .")
+
+
+def show_ess(ds):
+    """ plot / print effective sample size """
+
+    fig, axes = plt.subplots(1, ds.parameter.size, figsize=(15,4))
+    
+    for p, ax in zip(ds.parameter, axes):
+        _ds = ds.sel(parameter=p)
+        #_tr = float(_ds.true_parameters.isel(ensemble=0))
+        _ds.ess.plot.hist(ax=ax, bins=10, color="0.5")
+        ax.set_title(str(p.values) + f" , average = {float(_ds.ess.mean()):.0f}")
+        ax.axvline(_ds.ess.mean(), color="k", lw=4)
+    print("averaged effective sample size: ", " / ".join([v for v in ds.parameter.data]))
+    print(" / ".join([f"{v:.0f}" for v in ds.ess.mean("ensemble").data]))

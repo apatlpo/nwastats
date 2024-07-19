@@ -11,17 +11,19 @@ from time import sleep, time
 
 import xarray as xr
 
-import nwatools.stats as st
+import nwastats as st
 day = 86400
 
 #data_dir = "data/"
 #data_dir = "/home1/scratch/aponte/"
 data_dir = "/home/datawork-lops-osi/aponte/nwa/drifter_stats"
 
+overwrite=True
+
 # flow case
 U = "0.1"
-case = "3D_matern32_iso_matern12_pp_r0.0_u"+U
-#case = "3D_matern52_iso_matern12_pp_r0.0_u"+U
+#case = "3D_matern32_iso_matern12_pp_r0.0_u"+U
+case = "3D_matern52_iso_matern12_pp_r0.0_u"+U
 run_dir = os.path.join(data_dir, case)
 
 uv = True # True if u and v are observed
@@ -30,27 +32,31 @@ noise = 0.01 # observation noise added to u/v
 no_time = False # activates time inference
 no_space = False # activates time inference
 traj_decorrelation = False  # artificially decorrelate different moorings/drifters
-enable_nu = False # enable estimation of spectral slopes
+enable_nu = False
 
 # number of points used for inference#
 Nxy, Nt = 8, 50
-
-# run multiple Nxy at once
-#Nxy = [1, 2, 4, 8, 16]
-#Nxy = [2, 4, 8, 16]
 
 # size of the experiment ensemble
 #Ne = 10 # dev
 Ne = 100
 
+# separation parameter
 dx = None
-#dx = 100. # Nxy>1, separation between platforms
 
-experiment = 2
+# number of inference samples:
+n_mcmc = 20_000 # default value
+
+experiment = 0
 if experiment==0:
     # ensemble run
     Nxy = [1, 2, 4, 8, 16]
+    # dev
+    #Nxy = [1, 2, 4, 8]
+    #enable_nu = True
+    #n_mcmc = 500
 elif experiment==1:
+    # decorralated platform experiment
     traj_decorrelation = True
     Nxy = [1, 2, 4, 8, 16]
 elif experiment==2:
@@ -58,11 +64,26 @@ elif experiment==2:
     Nxy, Nt = 2, 50
     #dx = [5, 10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]  # 5 does not go through with 10% tolerance on distance
     dx = [10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]
+elif experiment==3:
+    # dependent platform experiment
+    Nxy = [1, 2, 4, 8, 16]
+elif experiment==4:
+    # nu_estimate experiment
+    enable_nu = True # enable estimation of spectral slopes
+    n_mcmc = 10_000
 
 if no_space:
     # makes little sense otherwise
     traj_decorrelation = True
 assert not no_time, "need to implement decorrelation across time"
+
+
+# inference parameters
+# dsteps = {16: 1/20, 8: 1/20, 4: 1/5, 2: 1/5, 1: 1/2} #v0
+dsteps = {16: .05, 8: .1, 4: .15, 2: .2, 1: .3} # v1
+if enable_nu:
+    dsteps = {k: v*.5 for k, v in dsteps.items()}
+
 
 # dask parameters
 #dask_jobs = 5  # number of dask pbd jobs
@@ -95,6 +116,10 @@ def run():
         _covparams = dict(zip(labels[1:], covparams))
         kwargs["lowers"] = [None]*3 + [_covparams["νs"]-0.5, _covparams["νt"]-0.49] + [None]
         kwargs["uppers"] = [None]*3 + [_covparams["νs"]+0.5, _covparams["νt"]+0.5] + [None]
+    kwargs["n_mcmc"] = n_mcmc
+    #kwargs["n_mcmc"] = 1_000 # dev
+    #kwargs["n_mcmc"] = 500 # dev
+    #print("n_mcmc = "+str(kwargs["n_mcmc"])) # check
 
     # ---
     # ## mooring inference
@@ -112,14 +137,22 @@ def run():
             nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
+        if enable_nu:
+            nc = nc.replace(".nc", f"_nu.nc")
+
+        # adjust step size dynamically
+        steps = [dsteps[Nxy]]*4
+        if enable_nu:
+            steps = [dsteps[Nxy]]*6
 
         # do not overwrite
-        if not os.path.isfile(nc):
+        if not os.path.isfile(nc) or overwrite:
             ds = st.run_mooring_ensembles(
                 Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise,
-                **kwargs,
-            ) 
+                **kwargs, steps=steps,
+            )
             ds.to_netcdf(nc, mode="w")
+            logging.info(f" output file: {nc}")
         else:
             logging.info(" ... skipping")
             ds = xr.open_dataset(nc)
@@ -156,13 +189,21 @@ def run():
             nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
+        if enable_nu:
+            nc = nc.replace(".nc", f"_nu.nc")
 
-        if not os.path.isfile(nc):
+        # adjust step size dynamically
+        steps = [dsteps[Nxy]]*4
+        if enable_nu:
+            steps = [dsteps[Nxy]]*6
+        
+        if not os.path.isfile(nc) or overwrite:
             ds = st.run_drifter_ensembles(
                 run_dir, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, 
-                **kwargs,
+                **kwargs, steps=steps,
             ) 
             ds.to_netcdf(nc, mode="w")
+            logging.info(f" output file: {nc}")
         else:
             logging.info(" ... skipping")
             ds = xr.open_dataset(nc)

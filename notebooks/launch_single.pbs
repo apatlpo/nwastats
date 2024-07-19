@@ -1,7 +1,7 @@
 #!/bin/csh
 #PBS -l walltime=48:00:00
 #PBS -q mpi_1
-#PBS -l select=1:ncpus=28:mem=100g
+#PBS -l select=1:ncpus=14:mem=50g
 
 # tracejob 8509847
 # http://datadmin.ifremer.fr/ganglia/
@@ -21,7 +21,7 @@ setenv OPENBLAS_NUM_THREADS 1
 
 # core computation
 date
-python drifter_3D_ensemble.py 
+python drifter_3D_inference.py
 date
 
 # cleanup dask workers
