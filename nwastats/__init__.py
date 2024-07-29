@@ -3,6 +3,7 @@ from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_number
 import xarray as xr
 
 import dask
@@ -340,7 +341,7 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     Inputs:
         x: matrices input points [N,3]
         xpr: matrices output points [M,3]
-        params: tuple length 3
+        params: tuple length 3a
             eta: standard deviation
             ld: spatial scale
             lt: t length scale
@@ -379,47 +380,6 @@ def kernel_3d_iso_uv(x, xpr, params, C):
 
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, *pt)
 
-    C *= eta**2
-    
-    return C
-
-# dev
-def kernel_3d_iso_uv_old(x, xpr, params, C):
-    """
-    3D spatially isotropic kernel, two velocity components
-    
-    Inputs:
-        x: matrices input points [N,3]
-        xpr: matrices output points [M,3]
-        params: tuple length 3
-            eta: standard deviation
-            ld: spatial scale
-            lt: t length scale
-            
-    """
-    eta, ld, lt = params
-    Cu, Cv, Cuv, Ct = C
-    
-    # Build the covariance matrix
-    n = x.shape[0]//2
-    _x = x[:n,0,None] - xpr.T[:n,0,None].T
-    _y = x[:n,1,None] - xpr.T[:n,1,None].T
-    _d = np.sqrt( _x**2 + _y**2 )
-    #
-    C = np.ones((2*n,2*n))
-    #
-    C[:n,:n] *= Cu(_x, _y, _d, ld)
-    C[n:,n:] *= Cv(_x, _y, _d, ld)
-    #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
-    # it is correct: Cuv = Cuv.T, Cuv is even in terms of x and y
-    C[:n,n:] *= Cuv(_x, _y, _d, ld)
-    C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
-    #
-    #_Cu  = Cu(_x, _y, _d, ld)
-    #_Cv  = Cv(_x, _y, _d, ld)
-    #_Cuv  = Cuv(_x, _y, _d, ld)
-    #C *= np.block([[_Cu, _Cuv],[_Cuv, _Cv]])
-    C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
     C *= eta**2
     
     return C
@@ -1148,11 +1108,9 @@ def inference_MH(
     X, U,
     noise, covparams,
     covfunc, labels,
-    #n_mcmc = 20_000,
     n_mcmc = None,
     steps = None,
     tqdm_disable=False,
-    #no_time=False, no_space=False,
     lowers=None, uppers=None,
     **kwargs,
 ):
@@ -1267,140 +1225,56 @@ def inference_MH(
 
     return ds
 
-# dev - old
-def inference_MH_old(
-    X, U,
-    noise, covparams,
-    covfunc, labels,
-    n_mcmc = 20_000,
-    steps = None,
-    tqdm_disable=False,
-    no_time=False, no_space=False,
-    **kwargs,
-):
-
-    # number of parameters infered
-    N = len(labels)
-
-    # default step sizes
-    if steps is None:
-        # ** isn't this too coarse ? **
-        steps = [1/5]*(N-1) + [1/2]
-    
-    # The order of everything is eta, ld, lt, noise
-    #step_sizes = np.array([.5, 5, .5, 0.005])
-    #initialisations = np.array([12, 100, 5, 0.01])
-    initialisations = np.array(covparams+[noise])
-    step_sizes = np.array(
-        [v*s for v, s in zip(initialisations, steps)]
-    )
-    lowers = np.repeat(0, N)
-    uppers = initialisations * 10
-
-    # setup objects
-    samples = [np.empty(n_mcmc) for _ in range(N)]
-    accept_samples = np.empty(n_mcmc)
-    lp_samples = np.empty(n_mcmc)
-    lp_samples[:] = np.nan
-    # init samples
-    for i, s in enumerate(samples):
-        s[0] =  initialisations[i]
-    accept_samples[0] = 0
-    #
-    covparams_prop = initialisations.copy()[0:N-1]
-    # run mcmc
-    gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
-
-    for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
-        
-        proposed = np.array([
-            np.random.normal(s[i-1], step, 1)
-            for s, step in zip(samples, step_sizes)
-        ])
-
-        if ((proposed.T <= lowers) | (proposed.T >= uppers)).any():
-            for s in samples:
-                s[i] = s[i-1]
-            lp_samples[i] = lp_samples[i-1]
-            accept_samples[i] = 0
-            continue
-
-        if accept_samples[i-1] == True:
-            gp_current = gp_proposed
-
-        covparams_prop = proposed[:-1]
-        gp_proposed = GPtideScipy(X, X, proposed[-1], covfunc, covparams_prop)
-
-        lp_current = gp_current.log_marg_likelihood(U)
-        lp_proposed = gp_proposed.log_marg_likelihood(U)
-
-        alpha = np.min([1, np.exp(lp_proposed - lp_current)])
-        u = np.random.uniform()
-
-        if alpha > u:
-            for s, p in zip(samples, proposed):
-                s[i] = p
-            accept_samples[i] = 1
-            lp_samples[i] = lp_proposed
-        else:
-            for s, p in zip(samples, proposed):
-                s[i] = s[i-1]
-            accept_samples[i] = 0
-            lp_samples[i] = lp_samples[i-1]
-
-    samples = np.vstack([samples[-1]]+samples[:-1])
-    ds = xr.Dataset(
-        dict(
-            samples=(("i", "parameter"), samples.T), 
-            accept=("i", accept_samples),
-            log_prob=("i", lp_samples),
-            init=(("parameter",), np.roll(initialisations,1)), # need to swap parameter orders
-            lower=(("parameter",), np.roll(lowers,1)),
-            upper=(("parameter",), np.roll(uppers,1)),
-        ),
-        coords=dict(parameter=labels)
-    )
-
-    #return noise_samples, eta_samples, ld_samples, lt_samples, 
-    accepted_fraction = float(ds["accept"].mean())
-    print(f"accepted fraction = {accepted_fraction*100:.1f} %")
-
-    # keep only accepted samples
-    #ds = ds.where(ds.accept==1, drop=True)
-
-    # MAP
-    i_map = int(ds["log_prob"].argmax())
-    ds["MAP"] = ds["samples"].isel(i=i_map)
-
-    ds.attrs["accepted_fraction"] = accepted_fraction
-    ds.attrs["inference"] = "MH"
-    ds.attrs["i_MAP"] = i_map
-
-    return ds
-
 def select_traj_core(ds, Nxy, dx):
+    # select initial time for drifters
     if "time" in ds:
         ds = ds.isel(time=0)
-    tolerance = .1
-    if dx is not None:
-        assert Nxy>1, "Nxy must be >1 if dx is specified"
-        if Nxy==2:
-            # select in a circular shell around the first point
-            traj_selection = [np.random.choice(ds.trajectory.values, 1)[0]]
-            p0 = ds.sel(trajectory=traj_selection[0])[["x", "y"]]
-            d = np.sqrt( (ds["x"]-float(p0.x))**2 + (ds["y"]-float(p0.y))**2 )
-            d = d.where( (d>dx*(1-tolerance)) & (d<dx*(1+tolerance)), drop=True )
-            if d.trajectory.size==0:
-                return
-            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
-        else:
-            #Nxy==3: equilateral triangle
-            assert False, "Not implemented"
+    #
+    if Nxy>1 and dx is not None:
+        # find central point
+        traj_selection = [np.random.choice(ds.trajectory.values, 1)[0]]
+        p0 = ds.sel(trajectory=traj_selection[0])[["x", "y"]]
+        if is_number(dx):
+            assert Nxy>1, "Nxy must be >1 if dx is specified"
+            if Nxy==2:
+                # select in a circular shell around the first point
+                d = np.sqrt( (ds["x"]-float(p0.x))**2 + (ds["y"]-float(p0.y))**2 )
+                tolerance = .1
+                d = d.where( (d>dx*(1-tolerance)) & (d<dx*(1+tolerance)), drop=True )
+                if d.trajectory.size==0:
+                    return
+                traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
+            else:
+                #Nxy==3: equilateral triangle
+                assert False, "Not implemented"
+        elif isinstance(dx, tuple) and dx[0]=="spiral":
+            # archimedean spiral design
+            _, dr_min, dr_max = dx
+            dtheta = np.pi/3
+            dr = np.random.uniform(dr_min, dr_max, 1)[0] # draw max separation
+            theta0 = np.random.uniform(0, 2*np.pi, 1)[0] # draw orientation
+            if Nxy==2:
+                a = dr*2*np.pi/dtheta
+            elif Nxy>2:
+                a = dr/(Nxy-2)*np.pi/dtheta
+            theta = np.arange(Nxy)*dtheta
+            z = a*theta/(2*np.pi) * np.exp(1j*(theta+theta0))
+            for i in range(Nxy-1):
+                x, y = float(p0.x) + np.real(z[i+1]), float(p0.y) + np.imag(z[i+1])
+                d = np.sqrt( (ds["x"]-x)**2 + (ds["y"]-y)**2 )
+                d = d.where( d<20 , drop=True ) # spatial resolution assumption hard coded here
+                if d.trajectory.size==0:
+                    return
+                #idx = np.random.choice(d.trajectory.values, 1)[0] # initial implementation
+                #idx = float(d.idxmin().data)
+                idx = d.idxmin().data[()] # extract value from 0d array
+                traj_selection.append(idx)
     else:
         traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
     return traj_selection
 
-def select_traj(*args, repeats=5):
+def select_traj(*args, repeats=10):
+    """ wrapper to allow trial and error """
     i, fail = 0, True
     while i<repeats and fail:
         s = select_traj_core(*args)
@@ -1421,6 +1295,7 @@ def mooring_inference_preprocess(
     
     # set random seed - means same mooring positions will be selected across different flow_scales
     np.random.seed(seed)
+
     # subsample temporally
     ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
     
@@ -1472,10 +1347,14 @@ def mooring_inference(
     # update noise covparams
     noise = noise * u_scale
     covparams[0] = covparams[0] * u_scale # amplitude
-    
+        
     # set up inference
     u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.trajectory_local)
     assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
+    # for tracking purposes
+    ds_in = xr.merge([u, v])
+    ds_in = ds_in.assign(X=ds_in.x, Y=ds_in.y).drop_vars(["x", "y", "trajectory"])
+    #
     x = x.values.ravel()
     y = y.values.ravel()
     t = t.values.ravel()
@@ -1491,8 +1370,8 @@ def mooring_inference(
         X = np.vstack([X, X])
         U = np.vstack([u, v])
     else:
-        U = u        
-        
+        U = u
+
     # reset seed here
     np.random.seed(seed)
     
@@ -1517,21 +1396,18 @@ def mooring_inference(
         ds.to_netcdf(output_file, mode="w")
         return output_file
     else:
-        return ds
+        return xr.merge([ds, ds_in])
 
 def run_mooring_ensembles(
     Ne, 
     dsf,
     covparams, covfunc, labels, N, noise,
-    step=1/5, **kwargs,
+    **kwargs,
 ):
     """ wrap mooring_inference to run ensembles """
 
     dkwargs = dict(tqdm_disable=True, n_mcmc=20_000)
     dkwargs.update(**kwargs)
-
-    # MH default
-    #dkwargs["steps"] = (step, step, step, 1/2)
 
     # preload data:
     D = [
@@ -1547,14 +1423,13 @@ def run_mooring_ensembles(
             **dkwargs,
         )
         for seed, ds in zip(range(Ne), D)
-        #for seed in range(Ne)
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    #ds = ds.isel(i=slice(0,None,5)) # subsample MCMC - moved to post-processing step
+
     return ds
 
-def open_drifter_file(run_dir, flow_scale=None, filter=True, **kwargs):
+def open_drifter_file(run_dir, flow_scale=None, dfilter=True, **kwargs):
     
     zarr_file = os.path.join(run_dir, f"drifters.zarr")
     if flow_scale is not None:
@@ -1572,7 +1447,7 @@ def open_drifter_file(run_dir, flow_scale=None, filter=True, **kwargs):
     print(f"Tmax = {Tmax:.2f} days")
     n0 = ds.trajectory.size
     dsf = ds.where( maxt>Tmax , drop=True)
-    if filter:
+    if dfilter:
         ds = dsf
     ns = dsf.trajectory.size
     survival_rate = ns/n0*100
@@ -1665,6 +1540,11 @@ def drifter_inference(
         # this should not be necessary
         u, v, x, y = xr.broadcast(ds.u, ds.v, ds.x, ds.y)
         assert u.shape==v.shape==x.shape==y.shape
+        # for tracking purposes
+        ds_in = xr.merge([u, v, x, y])
+        #ds_in = ds_in.assign(X=ds_in.x, Y=ds_in.y).drop_vars(["x", "y", "trajectory"])
+        ds_in = ds_in.drop_vars(["trajectory"])
+        #
         x = x.values.ravel()
         y = y.values.ravel()
         X = np.hstack([x[:,None], y[:,None],])
@@ -1673,6 +1553,11 @@ def drifter_inference(
         u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.trajectory)
         assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
         assert not np.isnan(u).any(), ("u nan",u)
+        # for tracking purposes
+        ds_in = xr.merge([u, v, x, y])
+        #ds_in = ds_in.assign(X=ds_in.x, Y=ds_in.y).drop_vars(["x", "y", "trajectory"])
+        ds_in = ds_in.drop_vars(["trajectory"])
+        #
         x = x.values.ravel()
         y = y.values.ravel()
         t = t.values.ravel()
@@ -1716,22 +1601,18 @@ def drifter_inference(
         ds.to_netcdf(output_file, mode="w")
         return output_file
     else:
-        return ds
+        return xr.merge([ds, ds_in])
     
 def run_drifter_ensembles(
     run_dir, 
     Ne,
     covparams, covfunc, labels, N, noise,
-    step=1/5,
     **kwargs,
 ):
     """ wrap drifter_inference to run ensembles """
 
     dkwargs = dict(tqdm_disable=True, n_mcmc=20_000)
     dkwargs.update(**kwargs)
-
-    # MH
-    #dkwargs["steps"] = (step, step, step, 1/2)
 
     # preload data
     ds = open_drifter_file(run_dir, **dkwargs)
@@ -1750,11 +1631,10 @@ def run_drifter_ensembles(
             **dkwargs,
         ) 
         for d, seed in zip(D, range(Ne))
-        #for seed in range(Ne)
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    #ds = ds.isel(i=slice(0,None,5)) # subsample MCMC - moved to post-processing step
+
     return ds
 
 
@@ -1886,6 +1766,7 @@ def compute_ess(ds):
 def plot_inference(ds, stack=False, corner_plot=True, xlim=True, burn=None):
 
     labels = ds["parameter"].values
+    Np = ds.parameter.size
     
     #samples = ds.samples.values
     #samples_az = convert_to_az(samples, labels)
@@ -1901,12 +1782,19 @@ def plot_inference(ds, stack=False, corner_plot=True, xlim=True, burn=None):
         density_data = [s[labels] for s in samples_az]
     
     #density_labels = ['posterior',]
+
+    if Np==4:
+        grid = (2,2)
+        figsize=(10,5)
+    elif Np==6:
+        grid = (3,2)
+        figsize=(10,10)
     
     axs = az.plot_density(   density_data,
                              shade=0.1,
-                             grid=(1, 5),
+                             grid=grid,
                              textsize=12,
-                             figsize=(15,4),
+                             figsize=figsize,
                              #data_labels=tuple(density_labels),
                              hdi_prob=0.995)
 
@@ -1943,9 +1831,14 @@ def traceplots(ds, MAP=True, burn=None):
 
     if burn:
         ds = ds.isel(i=slice(burn, None))
-    
-    fig, axes = plt.subplots(2,2, sharex=True, figsize=(15,6))
-    
+
+    Np = ds.parameter.size
+
+    if Np==4:
+        fig, axes = plt.subplots(2,2, sharex=True, figsize=(15,6))
+    elif Np==6:
+        fig, axes = plt.subplots(3,2, sharex=True, figsize=(15,10))
+
     for v, ax in zip(ds["parameter"], axes.flatten()[:ds.parameter.size]):
         ds.samples.sel(parameter=v).plot(ax=ax, hue="ensemble", add_legend=False)
         #if MAP:
@@ -1968,7 +1861,7 @@ def plot_sensitivity_combined(
     alpha=None, c=None,
     bounds=None,
     label=None,
-    type="shading",
+    ctype="shading",
     velocity_deficit=True,
     legend_loc=0,
     alpha_normalize=None,
@@ -2025,9 +1918,9 @@ def plot_sensitivity_combined(
         if (p=="γ" or p=="η" or p=="u") and alpha_normalize:
             l = p+"/α"
             da = (da/da["α"]).rename(p+"/α")
-        if type=="boxplot":
+        if ctype=="boxplot":
             _h = _boxplot(ax, da.values.T, da[x].values, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs, **kwargs)
-        elif type=="shading":
+        elif ctype=="shading":
             _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha, **kwargs)
         if b0 is None:
             b0 = _h
@@ -2050,9 +1943,9 @@ def plot_sensitivity_combined(
             if (p=="γ" or p=="η" or p=="u") and alpha_normalize:
                 l = p+"/α"
                 da = (da/da["α"]).rename(p+"/α")
-            if type=="boxplot":
+            if ctype=="boxplot":
                 _h = _boxplot(ax, da.values.T, da[x].values*x_scale+x_off, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs, **kwargs)
-            elif type=="shading":
+            elif ctype=="shading":
                 _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha, **kwargs)
             if b1 is None:
                 b1 = _h
@@ -2088,13 +1981,13 @@ def plot_sensitivity_combined(
                 _s = _s/da["α"]
                 
         truth = da["true_parameters"]*_s+da[x]*0
-        if type=="boxplot":
+        if ctype=="boxplot":
             h_truth = ax.scatter(
                 da[x].values, truth , 
                 c=colors["truth"], edgecolors="k", 
                 s=80, marker="*", label="truth", zorder=10,
             )
-        elif type=="shading":
+        elif ctype=="shading":
             h_truth = ax.plot(
                 da[x].values, truth, 
                 color=colors["truth"], lw=2, 
@@ -2177,7 +2070,7 @@ def print_MAP_truth_difference(ds, dim):
         )
 
 def print_quantile_width(ds, dim, quantiles=(1/4, 3/4)):
-    """ print quantile width along a dimension """
+    """ print normalized quantile width along a dimension """
     
     daq = ds.MAP.quantile(quantiles, "ensemble")
     nwidth = (daq.isel(quantile=1) - daq.isel(quantile=0))/ds.true_parameters

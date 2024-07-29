@@ -1,7 +1,8 @@
 #!/bin/csh
 #PBS -l walltime=48:00:00
 #PBS -q mpi_1
-#PBS -l select=1:ncpus=28:mem=100g
+##PBS -l select=1:ncpus=28:mem=100g
+#PBS -l select=1:ncpus=14:mem=50g
 
 # tracejob 8509847
 # http://datadmin.ifremer.fr/ganglia/
@@ -18,6 +19,13 @@ setenv OMP_NUM_THREADS 1
 setenv NUMEXPR_NUM_THREADS 1
 setenv MKL_NUM_THREADS 1
 setenv OPENBLAS_NUM_THREADS 1
+
+#@ i = 0
+#while ( {qstat -u aponte | grep -q 9929314 } )
+#    echo "Job not finished $i" > tmp.log
+#    sleep 2
+#    @ i += 1
+#end
 
 # core computation
 date

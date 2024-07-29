@@ -10,6 +10,7 @@ import logging
 from time import sleep, time
 
 import xarray as xr
+from pandas.api.types import is_number
 
 import nwastats as st
 day = 86400
@@ -19,6 +20,10 @@ day = 86400
 data_dir = "/home/datawork-lops-osi/aponte/nwa/drifter_stats"
 
 overwrite=True
+overwrite=False
+mooring, drifter = True, True
+#mooring, drifter = False, True
+#mooring, drifter = True, False
 
 # flow case
 U = "0.1"
@@ -47,7 +52,10 @@ dx = None
 # number of inference samples:
 n_mcmc = 20_000 # default value
 
-experiment = 0
+osuffix = None
+#nu_low, nu_up = None, None
+
+experiment = 5
 if experiment==0:
     # ensemble run
     Nxy = [1, 2, 4, 8, 16]
@@ -65,12 +73,28 @@ elif experiment==2:
     #dx = [5, 10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]  # 5 does not go through with 10% tolerance on distance
     dx = [10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]
 elif experiment==3:
-    # dependent platform experiment
+    # spiral deployments
     Nxy = [1, 2, 4, 8, 16]
+    dx = ("spiral", 50, 300)
 elif experiment==4:
     # nu_estimate experiment
     enable_nu = True # enable estimation of spectral slopes
     n_mcmc = 10_000
+    # 13h30*2
+    osuffix = "_lprior"
+    #nu_low = [.1, .1]
+    #nu_up = [5, 5]
+elif experiment==5:
+    # nu_estimate experiment
+    enable_nu = True # enable estimation of spectral slopes
+    n_mcmc = 10_000
+    #n_mcmc = 100 # dev
+    # 13h30*2
+    #osuffix = "_lprior"
+    dx = ("spiral", 50, 300)
+    #nu_low = [.1, .1]
+    #nu_up = [5, 5]
+
 
 if no_space:
     # makes little sense otherwise
@@ -86,10 +110,19 @@ if enable_nu:
 
 
 # dask parameters
-#dask_jobs = 5  # number of dask pbd jobs
-#jobqueuekw = dict(processes=20, cores=20)
-dask_jobs = 10  # number of dask pbd jobs
-jobqueuekw = dict(processes=10, cores=10, walltime="24:00:00")
+
+suffix="job0"
+#suffix="dumm" # tmp
+
+#dask_job_name = None
+dask_job_name = "dask"+suffix
+
+dask_num_jobs, dask_jobkw = 5, dict(processes=20, cores=20)
+#dask_num_jobs, dask_jobkw = 10, dict(processes=10, cores=10)
+
+dask_jobkw["walltime"] = "48:00:00"
+dask_jobkw["job_name"] = dask_job_name
+
 
 # ---------------------------------- main ------------------------------------
 
@@ -114,8 +147,18 @@ def run():
     if enable_nu:
         # expected order hardcoded below ... danger
         _covparams = dict(zip(labels[1:], covparams))
-        kwargs["lowers"] = [None]*3 + [_covparams["νs"]-0.5, _covparams["νt"]-0.49] + [None]
-        kwargs["uppers"] = [None]*3 + [_covparams["νs"]+0.5, _covparams["νt"]+0.5] + [None]
+        #if not nu_low:
+        #    nu_low = [_covparams["νs"]-0.5, _covparams["νt"]-0.49]
+        #    nu_up = [_covparams["νs"]+0.5, _covparams["νt"]+0.5]
+        #kwargs["lowers"] = [None]*3 + nu_low + [None]
+        #kwargs["uppers"] = [None]*3 + nu_up + [None]
+        kwargs["lowers"] = [None]*3 + [1, .1] + [None]
+        #kwargs["uppers"] = [None]*3 + [3.5, 3.5] + [None]
+        kwargs["uppers"] = [None]*3 + [5, 5] + [None]
+        #logging.info("nu_low = "+str(nu_low[0])+","+str(nu_low[1]))
+        logging.info("lowers = "+" , ".join([f"{v}" for v in kwargs["lowers"]]))
+        logging.info("uppers = "+" , ".join([f"{v}" for v in kwargs["uppers"]]))
+    
     kwargs["n_mcmc"] = n_mcmc
     #kwargs["n_mcmc"] = 1_000 # dev
     #kwargs["n_mcmc"] = 500 # dev
@@ -126,30 +169,42 @@ def run():
     logging.info("starting mooring inference ...")
 
     def run_mooring(Nxy, dx):
+        
         if dx is not None:
-            logging.info(f" Nxy= {Nxy}, dx={dx} - start")
+            if is_number(dx):
+                logging.info(f" Nxy= {Nxy}, dx={dx} - start")
+            elif isinstance(dx, tuple):
+                logging.info(f" Nxy= {Nxy}, dx={dx[0]} - start")
         else:
             logging.info(f" Nxy= {Nxy} - start")
         
         # build output file name
         nc = os.path.join(run_dir, f"moorings_ensemble_Nxy{Nxy}.nc")
         if dx is not None:
-            nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
+            if is_number(dx):
+                nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
+            elif isinstance(dx, tuple):
+                nc = nc.replace(".nc", f"_{dx[0]}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
         if enable_nu:
             nc = nc.replace(".nc", f"_nu.nc")
+        if osuffix is not None:
+            nc = nc.replace(".nc", osuffix+".nc")
 
         # adjust step size dynamically
         steps = [dsteps[Nxy]]*4
         if enable_nu:
             steps = [dsteps[Nxy]]*6
 
+        dkwargs = dict(**kwargs)
+        dkwargs.update(dx=dx, steps=steps)
+        
         # do not overwrite
         if not os.path.isfile(nc) or overwrite:
             ds = st.run_mooring_ensembles(
                 Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise,
-                **kwargs, steps=steps,
+                **dkwargs,
             )
             ds.to_netcdf(nc, mode="w")
             logging.info(f" output file: {nc}")
@@ -157,21 +212,24 @@ def run():
             logging.info(" ... skipping")
             ds = xr.open_dataset(nc)
             ds["parameter"] = ds.parameter.astype(str)
-        logging.info(f" Nxy= {Nxy}, dx={dx} - end")
+        logging.info(f" Nxy= {Nxy}, ... - end")
         return ds
 
-    if isinstance(dx, list):
-        Dm = []
-        for d in dx:
-            Dm.append(run_mooring(Nxy, d))
-        ds = Dm[0]
-    elif isinstance(Nxy, list):
-        Dm = []
-        for n in Nxy:
-            Dm.append(run_mooring(n, dx))
-        ds = Dm[0]
+    if mooring:
+        if isinstance(dx, list):
+            Dm = []
+            for d in dx:
+                Dm.append(run_mooring(Nxy, d))
+            ds = Dm[0]
+        elif isinstance(Nxy, list):
+            Dm = []
+            for n in Nxy:
+                Dm.append(run_mooring(n, dx))
+            ds = Dm[0]
+        else:
+            ds = run_mooring(Nxy, dx)
     else:
-        ds = run_mooring(Nxy, dx)
+        logging.info(" ! skipping !")
 
     logging.info(" ... ending mooring inference")
 
@@ -181,26 +239,41 @@ def run():
     logging.info("starting drifter inference ...")
 
     def run_drifter(Nxy, dx):
-        logging.info(f" Nxy= {Nxy}, dx={dx} - start")
-
+        
+        if dx is not None:
+            if is_number(dx):
+                logging.info(f" Nxy= {Nxy}, dx={dx} - start")
+            elif isinstance(dx, tuple):
+                logging.info(f" Nxy= {Nxy}, dx={dx[0]} - start")
+        else:
+            logging.info(f" Nxy= {Nxy} - start")
+        
         # build output file name    
         nc = os.path.join(run_dir, f"drifters_ensemble_Nxy{Nxy}.nc")
         if dx is not None:
-            nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
+            if is_number(dx):
+                nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
+            elif isinstance(dx, tuple):
+                nc = nc.replace(".nc", f"_{dx[0]}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
         if enable_nu:
             nc = nc.replace(".nc", f"_nu.nc")
+        if osuffix is not None:
+            nc = nc.replace(".nc", osuffix+".nc")
 
         # adjust step size dynamically
         steps = [dsteps[Nxy]]*4
         if enable_nu:
             steps = [dsteps[Nxy]]*6
+
+        dkwargs = dict(**kwargs)
+        dkwargs.update(dx=dx, steps=steps)
         
         if not os.path.isfile(nc) or overwrite:
             ds = st.run_drifter_ensembles(
                 run_dir, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, 
-                **kwargs, steps=steps,
+                **dkwargs,
             ) 
             ds.to_netcdf(nc, mode="w")
             logging.info(f" output file: {nc}")
@@ -208,21 +281,24 @@ def run():
             logging.info(" ... skipping")
             ds = xr.open_dataset(nc)
             ds["parameter"] = ds.parameter.astype(str)
-        logging.info(f" Nxy= {Nxy}, dx={dx} - end")
+        logging.info(f" Nxy= {Nxy}, ... - end")
         return ds
 
-    if isinstance(dx, list):
-        Dr = []
-        for d in dx:
-            Dr.append(run_drifter(Nxy, d))
-        ds = Dr[0]
-    elif isinstance(Nxy, list):
-        Dr = []
-        for n in Nxy:
-            Dr.append(run_drifter(n, dx))
-        ds = Dr[0]
+    if drifter:
+        if isinstance(dx, list):
+            Dr = []
+            for d in dx:
+                Dr.append(run_drifter(Nxy, d))
+            ds = Dr[0]
+        elif isinstance(Nxy, list):
+            Dr = []
+            for n in Nxy:
+                Dr.append(run_drifter(n, dx))
+            ds = Dr[0]
+        else:
+            ds = run_drifter(Nxy, dx)
     else:
-        ds = run_drifter(Nxy, dx)    
+        logging.info(" ! skipping !")
 
     logging.info(" ... ending drifter inference")
 
@@ -233,7 +309,7 @@ def spin_up_cluster(
     ctype,
     jobs=None,
     processes=None,
-    fraction=0.8,
+    fraction=0.9,
     timeout=20,
     **kwargs,
 ):
@@ -310,7 +386,6 @@ def dashboard_ssh_forward(client):
 def close_dask(cluster, client):
     logging.info("starts closing dask cluster ...")
     try:
-
         client.close()
         logging.info("client closed ...")
         # manually kill pbs jobs
@@ -331,6 +406,12 @@ def manual_kill_jobs():
 
     import subprocess, getpass
 
+    # 
+    jobname = dask_job_name
+    if jobname is None:
+        jobname = "dask-worke"
+    jobname = jobname[:10]
+    
     #
     username = getpass.getuser()
     #
@@ -348,7 +429,7 @@ def manual_kill_jobs():
     #
     for line in output.splitlines():
         lined = line.decode("UTF-8")
-        if username in lined and "dask" in lined:
+        if username in lined and jobname in lined:
             pid = lined.split(".")[0]
             bashCommand = "qdel " + str(pid)
             logging.info(" " + bashCommand)
@@ -367,7 +448,7 @@ if __name__=="__main__":
     # logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
     # to file
     logging.basicConfig(
-        filename="distributed.log",
+        filename="distributed_"+suffix+".log",
         level=logging.INFO,
         # level=logging.DEBUG,
         format='%(asctime)s %(message)s',
@@ -377,12 +458,11 @@ if __name__=="__main__":
 
 
     # spin up cluster
-    logging.info("start spinning up dask cluster, jobs={}".format(dask_jobs))
+    logging.info("start spinning up dask cluster, jobs={}".format(dask_num_jobs))
     cluster, client = spin_up_cluster(
         "distributed",
-        jobs=dask_jobs,
-        fraction=0.9,
-        **jobqueuekw,
+        jobs=dask_num_jobs,
+        **dask_jobkw,
     )
     ssh_command, dashboard_port = dashboard_ssh_forward(client)
     logging.info("dashboard via ssh: " + ssh_command)
